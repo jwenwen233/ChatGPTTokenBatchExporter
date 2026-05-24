@@ -699,6 +699,20 @@ async function deleteChatGptAccount(id) {
   await setAccounts(accounts.filter((item) => item.id !== id));
 }
 
+class AccountDeactivatedError extends Error {
+  constructor(email, detail = 'account_deactivated') {
+    super(`${email || '当前账号'} 已被删除或停用，自动从账号池删除。`);
+    this.name = 'AccountDeactivatedError';
+    this.code = 'account_deactivated';
+    this.detail = detail;
+  }
+}
+
+function isAccountDeactivatedError(error) {
+  return error?.code === 'account_deactivated'
+    || /account_deactivated|账号.*(删除|停用|禁用|暂停)|账户.*(删除|停用|禁用|暂停)|已被删除或停用/i.test(String(error?.message || error || ''));
+}
+
 async function deleteMailAccount(id) {
   const { mailAccounts } = await getData();
   await setMailAccounts(mailAccounts.filter((item) => item.id !== id));
@@ -967,6 +981,11 @@ async function refreshOneAccount(accountId, settings) {
     await updateAccountWithTokenState(account.id, tokenState);
     addLog(`${account.email}：已获取新的 accessToken。`, 'info');
   } catch (error) {
+    if (isAccountDeactivatedError(error)) {
+      await deleteChatGptAccount(account.id);
+      addLog(`${account.email}：账号已被删除或停用，已自动从 ChatGPT 账号池删除。`, 'warn');
+      return;
+    }
     await updateAccount(account.id, {
       status: 'failed',
       error: error?.message || String(error || ''),
@@ -1340,6 +1359,9 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
     const state = await sendAuthCommand(tabId, 'TK_AUTH_STATE', {}).catch((error) => ({
       error: error?.message || String(error || ''),
     }));
+    if (state.fatal && state.fatalReason === 'account_deactivated') {
+      throw new AccountDeactivatedError(account.email, state.fatalReason);
+    }
     if (state.blocked) {
       throw new Error(`登录页需要人工处理：${state.blockedReason || 'captcha/security check'}`);
     }

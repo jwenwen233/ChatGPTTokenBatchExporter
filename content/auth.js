@@ -242,6 +242,15 @@
     const lowerUrl = location.href.toLowerCase();
     const blocked = /captcha|verify you are human|cloudflare|unusual activity|suspicious|too many attempts|安全检查|人机|真人|验证你是真人/i.test(bodyText);
     const codeError = /invalid\s*(code|verification|passcode)|incorrect\s*(code|verification|passcode)|expired\s*(code|verification|passcode)|code\s*(is\s*)?(invalid|incorrect|expired)|验证码.*(错误|无效|过期)|错误的验证码|验证码不正确|验证码已过期/i.test(bodyText);
+    const accountDeactivated = /account_deactivated|account\s+(has\s+been\s+)?(deactivated|deleted|disabled|suspended)|账号.*(删除|停用|禁用|暂停)|账户.*(删除|停用|禁用|暂停)|没有账户/i.test(bodyText);
+    if (accountDeactivated) {
+      return {
+        page: 'account-deactivated',
+        fatal: true,
+        fatalReason: 'account_deactivated',
+        url: location.href,
+      };
+    }
     if (blocked) {
       return { page: 'blocked', blocked: true, blockedReason: 'captcha/security check', url: location.href };
     }
