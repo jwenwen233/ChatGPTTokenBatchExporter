@@ -998,7 +998,7 @@ async function refreshOneAccount(accountId, settings) {
   } finally {
     if (loginTab.id) {
       await chrome.tabs.update(loginTab.id, { url: 'about:blank' }).catch(() => {});
-      await sleep(300);
+      await sleep(100);
     }
     if (loginTab.id && settings.closeTabsAfterRun) {
       await chrome.tabs.remove(loginTab.id).catch(() => {});
@@ -1021,11 +1021,11 @@ async function replaceChatGptLoginTab(loginTab, settings = {}, reason = '') {
   if (previousTabId) {
     await chrome.tabs.remove(previousTabId).catch(() => {});
     loginTab.id = 0;
-    await sleep(300);
+    await sleep(100);
   }
   await resetOpenAiAuthState(0, reason);
   loginTab.id = await createChatGptLoginTab(settings);
-  await sleep(1200);
+  await sleep(300);
 }
 
 async function updateAccountWithTokenState(accountId, tokenState = {}) {
@@ -1175,7 +1175,7 @@ async function neutralizeOpenAiTabs(exceptTabId = 0) {
   if (!targets.length) return;
   await Promise.all(targets.map((tab) => chrome.tabs.update(tab.id, { url: 'about:blank' }).catch(() => null)));
   addLog(`已跳走 ${targets.length} 个 ChatGPT/OpenAI 标签页，避免旧页面恢复登录态。`, 'info');
-  await sleep(600);
+  await sleep(100);
 }
 
 async function getCookieStoreIds() {
@@ -1213,21 +1213,28 @@ function cookieKey(cookie = {}) {
 }
 
 async function collectOpenAiCookies() {
-  const byKey = new Map();
   const storeIds = await getCookieStoreIds();
+  const queries = [];
   for (const storeId of storeIds) {
     for (const origin of OPENAI_COOKIE_ORIGINS) {
       const query = { url: `${origin}/` };
       if (storeId !== undefined) query.storeId = storeId;
-      const cookies = await chrome.cookies.getAll(query).catch(() => []);
-      cookies.forEach((cookie) => byKey.set(cookieKey(cookie), { cookie, fallback: `${origin}/` }));
+      queries.push(chrome.cookies.getAll(query)
+        .then((cookies) => ({ cookies, fallback: `${origin}/` }))
+        .catch(() => ({ cookies: [], fallback: `${origin}/` })));
     }
     for (const domain of OPENAI_COOKIE_DOMAINS) {
       const query = { domain };
       if (storeId !== undefined) query.storeId = storeId;
-      const cookies = await chrome.cookies.getAll(query).catch(() => []);
-      cookies.forEach((cookie) => byKey.set(cookieKey(cookie), { cookie, fallback: domain }));
+      queries.push(chrome.cookies.getAll(query)
+        .then((cookies) => ({ cookies, fallback: domain }))
+        .catch(() => ({ cookies: [], fallback: domain })));
     }
+  }
+  const byKey = new Map();
+  const results = await Promise.all(queries);
+  for (const result of results) {
+    result.cookies.forEach((cookie) => byKey.set(cookieKey(cookie), { cookie, fallback: result.fallback }));
   }
   return Array.from(byKey.values());
 }
@@ -1252,27 +1259,6 @@ async function clearOpenAiCookiesByEnumeration() {
   return entries.length;
 }
 
-async function clearOpenAiSiteData() {
-  await chrome.browsingData.remove({
-    origins: OPENAI_COOKIE_ORIGINS,
-    originTypes: {
-      protectedWeb: true,
-      unprotectedWeb: true,
-    },
-  }, {
-    cache: true,
-    cacheStorage: true,
-    cookies: true,
-    fileSystems: true,
-    indexedDB: true,
-    localStorage: true,
-    serviceWorkers: true,
-    webSQL: true,
-  }).catch((error) => {
-    addLog(`站点数据清理接口返回异常，继续逐个 Cookie 清理：${error?.message || error}`, 'warn');
-  });
-}
-
 async function countOpenAiCookies() {
   return (await collectOpenAiCookies()).length;
 }
@@ -1281,21 +1267,19 @@ async function resetOpenAiAuthState(tabId = 0, reason = '') {
   if (reason) addLog(reason, 'info');
   if (tabId) {
     await chrome.tabs.update(tabId, { url: 'about:blank' }).catch(() => {});
-    await sleep(350);
+    await sleep(100);
   }
   await neutralizeOpenAiTabs(tabId);
   const removedBeforeSiteData = await clearOpenAiCookiesByEnumeration();
-  await clearOpenAiSiteData();
-  const removedAfterSiteData = await clearOpenAiCookiesByEnumeration();
   const remainingCookies = await countOpenAiCookies();
-  addLog(`ChatGPT/OpenAI 登录态清理完成：已枚举删除 Cookie ${removedBeforeSiteData + removedAfterSiteData} 个，剩余 ${remainingCookies} 个。`, remainingCookies ? 'warn' : 'info');
+  addLog(`ChatGPT/OpenAI 登录态快速清理完成：已删除 Cookie ${removedBeforeSiteData} 个，剩余 ${remainingCookies} 个。`, remainingCookies ? 'warn' : 'info');
   if (remainingCookies > 0) {
-    await sleep(500);
+    await sleep(100);
     const retryRemoved = await clearOpenAiCookiesByEnumeration();
     const retryRemaining = await countOpenAiCookies();
     addLog(`ChatGPT/OpenAI Cookie 二次清理：删除 ${retryRemoved} 个，剩余 ${retryRemaining} 个。`, retryRemaining ? 'warn' : 'info');
   }
-  await sleep(700);
+  await sleep(100);
 }
 
 function assertAccessTokenMatchesAccount(account, accessToken) {
@@ -1355,7 +1339,7 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
     }
 
     if (!isAuthOrSessionUrl(url)) {
-      await sleep(1000);
+      await sleep(300);
       continue;
     }
 
@@ -1378,7 +1362,7 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
       if (emailFilled || codeSubmittedAt) {
         addLog(`${account.email}：网页登录已完成，开始读取新的 accessToken。`, 'info');
         await chrome.tabs.update(tabId, { url: 'https://chatgpt.com/api/auth/session' }).catch(() => {});
-        await sleep(1500);
+        await sleep(700);
         continue;
       }
       if (wrongSessionResets < 3) {
@@ -1393,13 +1377,13 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
         codeRequestedAt = Date.now();
       } else {
         await chrome.tabs.update(tabId, { url: 'https://chatgpt.com/' }).catch(() => {});
-        await sleep(1500);
+        await sleep(700);
       }
       continue;
     }
     if (state.page === 'entry') {
       await sendAuthCommand(tabId, 'TK_START_LOGIN', {});
-      await sleep(800);
+      await sleep(400);
       continue;
     }
     if (state.page === 'email' && !emailFilled) {
@@ -1407,7 +1391,7 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
       emailFilled = true;
       codeRequestedAt = Date.now();
       addLog(`${account.email}：已提交邮箱，等待登录验证码邮件。`, 'info');
-      await sleep(1200);
+      await sleep(600);
       continue;
     }
     if (state.page === 'password') {
@@ -1419,7 +1403,7 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
       }
       codeRequestedAt = Date.now();
       addLog(`${account.email}：已切换到邮箱验证码登录。`, 'info');
-      await sleep(1200);
+      await sleep(600);
       continue;
     }
     if (state.page === 'code') {
@@ -1433,7 +1417,7 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
             addLog(`${account.email}：验证码已提交，等待页面完成登录，不再重复查信。`, 'info');
             waitingAfterCodeLogged = true;
           }
-          await sleep(1500);
+          await sleep(700);
           continue;
         }
         addLog(`${account.email}：验证码提交后仍停留在验证码页，重新查信尝试下一个验证码。`, 'warn');
@@ -1450,7 +1434,7 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
         if (resent?.clicked) {
           codeRequestedAt = Date.now();
           addLog(`${account.email}：已点击重新发送验证码邮件，旧验证码会被排除。`, 'info');
-          await sleep(3000);
+          await sleep(1000);
           continue;
         }
         addLog(`${account.email}：未找到重新发送按钮，继续排除旧验证码后查信。`, 'warn');
@@ -1461,11 +1445,11 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
       await sendAuthCommand(tabId, 'TK_FILL_CODE', { code: codeResult.code });
       codeSubmittedAt = Date.now();
       waitingAfterCodeLogged = false;
-      await sleep(2000);
+      await sleep(800);
       continue;
     }
 
-    await sleep(700);
+    await sleep(300);
   }
 
   throw new Error('登录超时，未能读取到新的 accessToken。');
