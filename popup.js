@@ -479,6 +479,16 @@ async function uploadCliProxyAuthFile(name, payload) {
   });
 }
 
+async function deleteCliProxyAuthFile(name) {
+  const safeName = String(name || '').trim();
+  if (!safeName || !safeName.endsWith('.json') || safeName.includes('/') || safeName.includes('\\')) {
+    throw new Error(`无效 CliProxy 文件名：${safeName || '(空)'}`);
+  }
+  await cliProxyFetch(`/v0/management/auth-files?name=${encodeURIComponent(safeName)}`, {
+    method: 'DELETE',
+  });
+}
+
 function isCliProxyCodexEntry(entry = {}) {
   const name = String(entry.name || '').trim();
   const type = String(entry.type || entry.provider || '').trim().toLowerCase();
@@ -786,6 +796,21 @@ async function getFileHandleByRelativePath(relativePath) {
   return dir.getFileHandle(parts[parts.length - 1]);
 }
 
+async function removeCockpitFileByRelativePath(relativePath) {
+  await ensureCockpitPermission();
+  const config = getExternalSourceConfig();
+  let parts = String(relativePath || '').split('/').filter(Boolean);
+  if (cockpitRootHandle.name === config.accountsDir && parts[0] === config.accountsDir) {
+    parts = parts.slice(1);
+  }
+  if (!parts.length) throw new Error(`无效 Cockpit 文件路径：${relativePath}`);
+  let dir = cockpitRootHandle;
+  for (const part of parts.slice(0, -1)) {
+    dir = await dir.getDirectoryHandle(part);
+  }
+  await dir.removeEntry(parts[parts.length - 1]);
+}
+
 function buildUpdatedCockpitRecord(existing, account) {
   const tokenInfo = getOpenAiTokenInfo(account.accessToken);
   const updated = { ...existing };
@@ -843,6 +868,23 @@ async function updateCockpitSummary(accountsByCockpitId) {
     await writeJsonFile(summaryHandle, summary);
   } catch {
     // Cockpit summary is optional; individual account JSON is the source of truth.
+  }
+}
+
+async function removeCockpitSummaryAccounts(accountIds = []) {
+  const ids = new Set(accountIds.map(String).filter(Boolean));
+  if (!ids.size) return;
+  try {
+    const summaryHandle = await getFileHandleByRelativePath('codex_accounts.json');
+    const summary = await readJsonFile(summaryHandle);
+    if (!Array.isArray(summary.accounts)) return;
+    const before = summary.accounts.length;
+    summary.accounts = summary.accounts.filter((item) => !ids.has(String(item.id || '').trim()));
+    if (summary.accounts.length !== before) {
+      await writeJsonFile(summaryHandle, summary);
+    }
+  } catch {
+    // Some Cockpit versions can work from individual JSON files without a summary update.
   }
 }
 
@@ -940,6 +982,41 @@ async function writeBackCliProxyAccounts(accountIds = [], minRefreshStartedAt = 
   setCockpitStatus(`已通过 CliProxy API 导入刷新后的 JSON：${uploaded} 个，已确认 accessToken 不是原文件旧值。`);
 }
 
+async function deleteExternalDeactivatedAccounts(deletedAccounts = []) {
+  const sourceId = getExternalSourceConfig().id;
+  const accounts = (Array.isArray(deletedAccounts) ? deletedAccounts : [])
+    .filter((account) => account?.source === 'cockpit' && isAccountForExternalSource(account, sourceId));
+  if (!accounts.length) return [];
+
+  const deletedIds = [];
+  const cockpitSummaryIds = [];
+  const failures = [];
+  for (const account of accounts) {
+    deletedIds.push(account.id);
+    cockpitPulledItems = cockpitPulledItems.filter((item) => item.accountId !== account.id);
+    cockpitLastPulledIds = cockpitLastPulledIds.filter((id) => id !== account.id);
+    try {
+      if (sourceId === 'cliproxy') {
+        await deleteCliProxyAuthFile(account.cockpitRelativePath || account.sourceFile || `${account.cockpitAccountId}.json`);
+      } else {
+        await removeCockpitFileByRelativePath(account.cockpitRelativePath || account.sourceFile || `${account.cockpitAccountId}.json`);
+        if (account.cockpitAccountId) cockpitSummaryIds.push(account.cockpitAccountId);
+      }
+      setCockpitStatus(`${account.email} 已停用，已从 ${getExternalSourceLabel()} 删除。`);
+    } catch (error) {
+      failures.push(`${account.email}：${error?.message || error}`);
+    }
+  }
+  if (sourceId !== 'cliproxy') {
+    await removeCockpitSummaryAccounts(cockpitSummaryIds);
+  }
+  renderCockpitList(cockpitPulledItems);
+  if (failures.length) {
+    setCockpitStatus(`停用账号已从插件账号池删除，但从 ${getExternalSourceLabel()} 删除失败 ${failures.length} 个：${failures.slice(0, 2).join('；')}`);
+  }
+  return deletedIds;
+}
+
 async function writeBackCockpitAccounts(accountIds = [], minRefreshStartedAt = 0) {
   const config = getExternalSourceConfig();
   if (config.id === 'cliproxy') {
@@ -1007,8 +1084,17 @@ async function refreshCockpit401AndWriteBack() {
   await saveSettingsBeforeAction();
   setCockpitStatus(`开始刷新已选择的 ${label} 账号 ${selectedIds.length} 个...`);
   const refreshStartedAt = Date.now();
-  await send('START_COCKPIT_BATCH', { accountIds: selectedIds });
-  await writeBackCockpitAccounts(selectedIds, refreshStartedAt);
+  const batchResult = await send('START_COCKPIT_BATCH', { accountIds: selectedIds });
+  const deletedIds = await deleteExternalDeactivatedAccounts(batchResult.deletedAccounts || []);
+  const remainingIds = selectedIds.filter((id) => !deletedIds.includes(id));
+  if (!remainingIds.length) {
+    await refresh();
+    if (!dom.cockpitStatus?.textContent.includes('删除失败')) {
+      setCockpitStatus(`已处理 ${label} 账号：停用账号已从插件和本地工具删除。`);
+    }
+    return;
+  }
+  await writeBackCockpitAccounts(remainingIds, refreshStartedAt);
 }
 
 

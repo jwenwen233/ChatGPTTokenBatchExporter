@@ -130,12 +130,11 @@ async function handleMessage(message) {
       await deleteMailAccount(message.id || '');
       return getUiState();
     case 'START_COCKPIT_BATCH':
-      await runBatch({
+      return runBatch({
         force: true,
         reason: 'cockpit',
         accountIds: Array.isArray(message.accountIds) ? message.accountIds : [],
       });
-      return getUiState();
     case 'CHECK_TOKENS':
       await checkTokenStatusOnly({ accountIds: message.accountIds || [] });
       return getUiState();
@@ -914,10 +913,11 @@ async function checkTokenStatusOnly(options = {}) {
 async function runBatch(options = {}) {
   if (runtime.running) {
     addLog('已有批量任务正在运行，跳过本次启动。', 'warn');
-    return;
+    return getUiState();
   }
   runtime.running = true;
   runtime.lastRunAt = new Date().toISOString();
+  const deletedAccounts = [];
   try {
     const { accounts, settings } = await getData();
     const accountIds = new Set(Array.isArray(options.accountIds) ? options.accountIds.map(String) : []);
@@ -939,9 +939,11 @@ async function runBatch(options = {}) {
         }
         addLog(`${account.email} accessToken 已不可用，开始刷新。`, 'warn');
       }
-      await refreshOneAccount(account.id, settings);
+      const result = await refreshOneAccount(account.id, settings);
+      if (result?.deleted) deletedAccounts.push(result.account);
     }
     addLog('批量任务完成。', 'info');
+    return { ...(await getUiState()), deletedAccounts };
   } finally {
     runtime.running = false;
     runtime.currentAccountId = '';
@@ -982,9 +984,10 @@ async function refreshOneAccount(accountId, settings) {
     addLog(`${account.email}：已获取新的 accessToken。`, 'info');
   } catch (error) {
     if (isAccountDeactivatedError(error)) {
+      const deletedAccount = { ...account };
       await deleteChatGptAccount(account.id);
       addLog(`${account.email}：账号已被删除或停用，已自动从 ChatGPT 账号池删除。`, 'warn');
-      return;
+      return { deleted: true, account: deletedAccount };
     }
     await updateAccount(account.id, {
       status: 'failed',
