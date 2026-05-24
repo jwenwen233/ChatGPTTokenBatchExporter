@@ -367,6 +367,17 @@ button:hover {
   color: var(--text-secondary);
 }
 
+.btn-danger {
+  border-color: var(--red);
+  background: var(--red);
+  color: #fff;
+}
+
+.btn-danger:hover {
+  background: color-mix(in srgb, var(--red) 88%, #000);
+  color: #fff;
+}
+
 .btn-sm {
   min-height: 28px;
   padding: 5px 10px;

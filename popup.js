@@ -25,6 +25,7 @@ const dom = {
   btnSelectCockpitDir: $('btn-select-cockpit-dir'),
   btnPullCockpit401: $('btn-pull-cockpit-401'),
   btnRefreshCockpit: $('btn-refresh-cockpit'),
+  btnStopBatch: $('btn-stop-batch'),
   btnToggleAccountsList: $('btn-toggle-accounts-list'),
   btnToggleMailList: $('btn-toggle-mail-list'),
   externalSource: $('external-source'),
@@ -1185,7 +1186,14 @@ function renderLogs(logs = []) {
 
 function render(options = {}) {
   const runtime = state?.runtime || {};
-  dom.runState.textContent = runtime.running ? '运行中' : '空闲';
+  dom.runState.textContent = runtime.running
+    ? (runtime.cancelRequested ? '停止中' : '运行中')
+    : '空闲';
+  if (dom.btnStopBatch) {
+    dom.btnStopBatch.classList.toggle('hidden', !runtime.running);
+    dom.btnStopBatch.disabled = Boolean(runtime.cancelRequested);
+    dom.btnStopBatch.textContent = runtime.cancelRequested ? '停止中' : '停止';
+  }
   if (!preserveFormValues || options.forceForms) {
     renderSettings(state?.settings || {});
   }
@@ -1229,6 +1237,9 @@ dom.btnPullCockpit401.addEventListener('click', () => runAction(async () => {
   await pullCockpit401Accounts();
 }));
 dom.btnRefreshCockpit.addEventListener('click', () => runAction(refreshCockpit401AndWriteBack));
+dom.btnStopBatch.addEventListener('click', () => runAction(async () => {
+  await send('STOP_BATCH');
+}));
 
 async function readTextFileToTextarea(fileInput, textarea) {
   const file = fileInput.files?.[0];

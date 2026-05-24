@@ -67,6 +67,7 @@ const DIRECT_VALIDATION_ENDPOINTS = [
 
 const runtime = {
   running: false,
+  cancelRequested: false,
   logs: [],
   currentAccountId: '',
   lastRunAt: '',
@@ -135,6 +136,10 @@ async function handleMessage(message) {
         reason: 'cockpit',
         accountIds: Array.isArray(message.accountIds) ? message.accountIds : [],
       });
+    case 'STOP_BATCH':
+      runtime.cancelRequested = true;
+      addLog('已请求停止批量任务，当前等待/登录步骤会尽快中断。', 'warn');
+      return getUiState();
     case 'CHECK_TOKENS':
       await checkTokenStatusOnly({ accountIds: message.accountIds || [] });
       return getUiState();
@@ -229,6 +234,7 @@ async function getUiState() {
     ...data,
     runtime: {
       running: runtime.running,
+      cancelRequested: runtime.cancelRequested,
       currentAccountId: runtime.currentAccountId,
       lastRunAt: runtime.lastRunAt,
       logs: runtime.logs.slice(-300),
@@ -916,6 +922,7 @@ async function runBatch(options = {}) {
     return getUiState();
   }
   runtime.running = true;
+  runtime.cancelRequested = false;
   runtime.lastRunAt = new Date().toISOString();
   const deletedAccounts = [];
   try {
@@ -926,9 +933,11 @@ async function runBatch(options = {}) {
       : accounts;
     addLog(`开始批量处理 ${targetAccounts.length} 个账号。`, 'info');
     for (const account of targetAccounts) {
+      throwIfBatchCancelled();
       runtime.currentAccountId = account.id;
       if (!options.force && !account.cockpitRefreshRequired) {
         const validation = await validateAndUpdateAccount(account, settings);
+        throwIfBatchCancelled();
         if (validation.valid) {
           addLog(`${account.email} accessToken 当前可用，跳过登录。`, 'info');
           continue;
@@ -944,10 +953,29 @@ async function runBatch(options = {}) {
     }
     addLog('批量任务完成。', 'info');
     return { ...(await getUiState()), deletedAccounts };
+  } catch (error) {
+    if (isBatchCancelledError(error)) {
+      addLog('批量任务已停止。', 'warn');
+      return { ...(await getUiState()), deletedAccounts, cancelled: true };
+    }
+    throw error;
   } finally {
     runtime.running = false;
+    runtime.cancelRequested = false;
     runtime.currentAccountId = '';
   }
+}
+
+function throwIfBatchCancelled() {
+  if (runtime.cancelRequested) {
+    const error = new Error('批量任务已停止。');
+    error.code = 'batch_cancelled';
+    throw error;
+  }
+}
+
+function isBatchCancelledError(error) {
+  return error?.code === 'batch_cancelled' || /批量任务已停止/.test(String(error?.message || error || ''));
 }
 
 async function updateAccount(id, patch) {
@@ -1312,8 +1340,10 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
   let codePageLogged = false;
   let codeSubmittedAt = 0;
   let waitingAfterCodeLogged = false;
+  let codeLookupContext = null;
 
   while (Date.now() < deadline) {
+    throwIfBatchCancelled();
     const tabId = loginTab?.id || 0;
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab?.id) throw new Error('登录标签页已关闭。');
@@ -1387,6 +1417,7 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
       continue;
     }
     if (state.page === 'email' && !emailFilled) {
+      codeLookupContext = await prepareVerificationCodeLookupContext(mailAccount, settings, account);
       await sendAuthCommand(tabId, 'TK_FILL_EMAIL', { email: account.email });
       emailFilled = true;
       codeRequestedAt = Date.now();
@@ -1395,6 +1426,7 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
       continue;
     }
     if (state.page === 'password') {
+      codeLookupContext = await prepareVerificationCodeLookupContext(mailAccount, settings, account);
       const switched = await sendAuthCommand(tabId, 'TK_USE_EMAIL_CODE', { email: account.email }).catch((error) => ({
         error: error?.message || String(error || ''),
       }));
@@ -1428,6 +1460,7 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
         addLog(`${account.email}：页面提示验证码无效或过期，自动重新发送邮件并等待新验证码。`, 'warn');
         codeSubmittedAt = 0;
         waitingAfterCodeLogged = false;
+        codeLookupContext = await prepareVerificationCodeLookupContext(mailAccount, settings, account);
         const resent = await sendAuthCommand(tabId, 'TK_RESEND_CODE', {}).catch((error) => ({
           error: error?.message || String(error || ''),
         }));
@@ -1439,7 +1472,7 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
         }
         addLog(`${account.email}：未找到重新发送按钮，继续排除旧验证码后查信。`, 'warn');
       }
-      const codeResult = await fetchVerificationCode(mailAccount, codeRequestedAt, Array.from(triedCodes), settings, account);
+      const codeResult = await fetchVerificationCode(mailAccount, codeRequestedAt, Array.from(triedCodes), settings, account, codeLookupContext);
       triedCodes.add(codeResult.code);
       addLog(`${account.email}：读取到邮箱验证码 ${codeResult.code}。`, 'info');
       await sendAuthCommand(tabId, 'TK_FILL_CODE', { code: codeResult.code });
@@ -1500,13 +1533,13 @@ async function ensureScript(tabId, file) {
   }
 }
 
-async function fetchVerificationCode(mailAccount, requestedAt, excludeCodes, settings, chatGptAccount = {}) {
+async function fetchVerificationCode(mailAccount, requestedAt, excludeCodes, settings, chatGptAccount = {}, lookupContext = null) {
   const provider = normalizeMailProviderId(mailAccount.provider) || MAIL_PROVIDER_MICROSOFT;
   if (provider === MAIL_PROVIDER_LUCKMAIL) {
     return fetchLuckmailVerificationCode(mailAccount, requestedAt, excludeCodes, settings, chatGptAccount);
   }
   if (provider === MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL) {
-    return fetchCloudflareTempEmailVerificationCode(mailAccount, requestedAt, excludeCodes, settings, chatGptAccount);
+    return fetchCloudflareTempEmailVerificationCode(mailAccount, requestedAt, excludeCodes, settings, chatGptAccount, lookupContext);
   }
   return fetchMicrosoftVerificationCode(mailAccount, requestedAt, excludeCodes, settings);
 }
@@ -1519,6 +1552,27 @@ function buildOpenAiCodeFilters(requestedAt, excludeCodes = []) {
     requiredKeywords: ['openai', 'chatgpt', 'code', '验证码'],
     excludeCodes,
   };
+}
+
+async function prepareVerificationCodeLookupContext(mailAccount, settings, chatGptAccount = {}) {
+  const provider = normalizeMailProviderId(mailAccount?.provider) || MAIL_PROVIDER_MICROSOFT;
+  if (provider !== MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL) return null;
+  try {
+    const targetEmail = getCloudflareTempEmailTargetEmail(mailAccount, chatGptAccount);
+    const lookupMode = normalizeCloudflareLookupMode(mailAccount.lookupMode);
+    const messages = await listCloudflareTempEmailTargetMessages(mailAccount, targetEmail, lookupMode);
+    const seenMessageKeys = messages.map(cloudflareTempEmailMessageKey).filter(Boolean);
+    addLog(`${targetEmail}：Temp 提交邮箱前已记录 ${seenMessageKeys.length} 封现有邮件，后续只优先使用新邮件验证码。`, 'info');
+    return {
+      provider: MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL,
+      targetEmail,
+      lookupMode,
+      seenMessageKeys,
+    };
+  } catch (error) {
+    addLog(`${chatGptAccount.email || '当前账号'}：Temp 提交前邮件快照失败，将退回时间窗口判断：${error?.message || error}`, 'warn');
+    return null;
+  }
 }
 
 function normalizeMicrosoftLocalMessages(messages = []) {
@@ -1776,55 +1830,39 @@ async function requestCloudflareTempEmailJson(mailAccount, path, options = {}) {
   return payload;
 }
 
-async function fetchCloudflareTempEmailVerificationCode(mailAccount, requestedAt, excludeCodes, settings, chatGptAccount = {}) {
-  const targetEmail = normalizeEmail(chatGptAccount.email)
-    || normalizeEmail(mailAccount.email === '*' ? '' : mailAccount.email)
-    || normalizeEmail(mailAccount.receiveMailbox);
+async function fetchCloudflareTempEmailVerificationCode(mailAccount, requestedAt, excludeCodes, settings, chatGptAccount = {}, lookupContext = null) {
+  const targetEmail = getCloudflareTempEmailTargetEmail(mailAccount, chatGptAccount);
   if (!targetEmail) {
     throw new Error('Cloudflare Temp Email 缺少目标邮箱。');
   }
   const lookupMode = normalizeCloudflareLookupMode(mailAccount.lookupMode);
-  const queryAddresses = lookupMode === 'registration-email' ? [''] : getEmailMatchCandidates(targetEmail);
   const filters = buildCloudflareTempEmailCodeFilters(requestedAt, excludeCodes);
+  const snapshotKeys = new Set(Array.isArray(lookupContext?.seenMessageKeys) ? lookupContext.seenMessageKeys : []);
   const maxRetries = Math.max(1, Number(settings.mailMaxRetries) || 1);
   const retryDelayMs = Math.max(3000, Number(settings.mailRetryDelayMs) || 3000);
   let lastError = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+    throwIfBatchCancelled();
     try {
-      const directMessages = [];
-      for (const queryAddress of queryAddresses) {
-        const directPayload = await requestCloudflareTempEmailJson(mailAccount, '/admin/mails', {
-          searchParams: { limit: 20, offset: 0, address: queryAddress },
-        });
-        directMessages.push(...filterCloudflareTempEmailMessagesForTarget(
-          CloudflareTempEmailUtils.normalizeCloudflareTempEmailMailApiMessages(directPayload),
-          targetEmail,
-          queryAddress,
-          lookupMode
-        ));
+      const messages = await listCloudflareTempEmailTargetMessages(mailAccount, targetEmail, lookupMode);
+      addLog(`${targetEmail}：Temp 查信 ${attempt}/${maxRetries}，匹配到 ${messages.length} 封。`, 'info');
+      const sample = summarizeCloudflareTempEmailMessagesForLog(messages);
+      if (sample) addLog(`${targetEmail}：Temp 最近邮件样本：${sample}`, 'info');
+
+      let match = null;
+      if (snapshotKeys.size) {
+        const newMessages = messages.filter((message) => !snapshotKeys.has(cloudflareTempEmailMessageKey(message)));
+        addLog(`${targetEmail}：Temp 快照过滤后新邮件 ${newMessages.length} 封。`, 'info');
+        match = pickVerificationCodeIgnoringMessageTime(newMessages, filters);
       }
-      addLog(`${targetEmail}：Temp 查信 ${attempt}/${maxRetries}，按邮箱查询返回 ${directMessages.length} 封。`, 'info');
-      let match = pickVerificationCodeWithinTimeWindow(directMessages, filters);
       if (!match?.code) {
-        const recentPayload = await requestCloudflareTempEmailJson(mailAccount, '/admin/mails', {
-          searchParams: { limit: 50, offset: 0 },
-        });
-        const recentMessages = filterCloudflareTempEmailMessagesForTarget(
-          CloudflareTempEmailUtils.normalizeCloudflareTempEmailMailApiMessages(recentPayload),
-          targetEmail,
-          '',
-          lookupMode
-        );
-        addLog(`${targetEmail}：Temp 最近邮件本地匹配 ${recentMessages.length} 封。`, 'info');
-        const sample = summarizeCloudflareTempEmailMessagesForLog(recentMessages);
-        if (sample) addLog(`${targetEmail}：Temp 最近邮件样本：${sample}`, 'info');
-        match = pickVerificationCodeWithinTimeWindow(recentMessages, filters);
+        match = pickVerificationCodeWithinTimeWindow(messages, filters);
       }
       if (match?.code) {
         return match;
       }
-      addLog(`${targetEmail}：严格时间窗口内未找到新验证码，继续等待新邮件。`, 'info');
+      addLog(`${targetEmail}：未找到快照后的新验证码，继续等待新邮件。`, 'info');
       lastError = new Error(`Cloudflare Temp Email 暂未返回匹配验证码（${attempt}/${maxRetries}）。`);
     } catch (error) {
       lastError = error;
@@ -1833,6 +1871,63 @@ async function fetchCloudflareTempEmailVerificationCode(mailAccount, requestedAt
   }
 
   throw lastError || new Error('Cloudflare Temp Email 未找到验证码。');
+}
+
+function getCloudflareTempEmailTargetEmail(mailAccount, chatGptAccount = {}) {
+  return normalizeEmail(chatGptAccount.email)
+    || normalizeEmail(mailAccount.email === '*' ? '' : mailAccount.email)
+    || normalizeEmail(mailAccount.receiveMailbox);
+}
+
+async function listCloudflareTempEmailTargetMessages(mailAccount, targetEmail, lookupMode) {
+  const queryAddresses = lookupMode === 'registration-email' ? [''] : getEmailMatchCandidates(targetEmail);
+  const messages = [];
+  for (const queryAddress of queryAddresses) {
+    const directPayload = await requestCloudflareTempEmailJson(mailAccount, '/admin/mails', {
+      searchParams: { limit: 20, offset: 0, address: queryAddress },
+    });
+    messages.push(...filterCloudflareTempEmailMessagesForTarget(
+      CloudflareTempEmailUtils.normalizeCloudflareTempEmailMailApiMessages(directPayload),
+      targetEmail,
+      queryAddress,
+      lookupMode
+    ));
+  }
+  const recentPayload = await requestCloudflareTempEmailJson(mailAccount, '/admin/mails', {
+    searchParams: { limit: 50, offset: 0 },
+  });
+  messages.push(...filterCloudflareTempEmailMessagesForTarget(
+    CloudflareTempEmailUtils.normalizeCloudflareTempEmailMailApiMessages(recentPayload),
+    targetEmail,
+    '',
+    lookupMode
+  ));
+  return dedupeCloudflareTempEmailMessages(messages);
+}
+
+function dedupeCloudflareTempEmailMessages(messages = []) {
+  const seen = new Set();
+  const result = [];
+  for (const message of Array.isArray(messages) ? messages : []) {
+    const key = cloudflareTempEmailMessageKey(message);
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    result.push(message);
+  }
+  return result;
+}
+
+function cloudflareTempEmailMessageKey(message = {}) {
+  const id = normalizeString(message.id);
+  if (id) return `id:${id}`;
+  return [
+    normalizeEmail(message.address),
+    normalizeEmail(message.originalRecipient),
+    normalizeString(message.receivedDateTime),
+    normalizeString(message.from?.emailAddress?.address),
+    normalizeString(message.subject),
+    normalizeString(message.bodyPreview).slice(0, 240),
+  ].join('|');
 }
 
 function buildCloudflareTempEmailCodeFilters(requestedAt, excludeCodes = []) {
@@ -1848,6 +1943,13 @@ function buildCloudflareTempEmailCodeFilters(requestedAt, excludeCodes = []) {
 
 function pickVerificationCodeWithinTimeWindow(messages = [], filters = {}) {
   return MultiPageMicrosoftEmail.extractVerificationCodeFromMessages(messages, filters);
+}
+
+function pickVerificationCodeIgnoringMessageTime(messages = [], filters = {}) {
+  return MultiPageMicrosoftEmail.extractVerificationCodeFromMessages(messages, {
+    ...filters,
+    filterAfterTimestamp: 0,
+  });
 }
 
 function summarizeCloudflareTempEmailMessagesForLog(messages = []) {
