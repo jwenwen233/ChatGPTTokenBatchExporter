@@ -1441,9 +1441,19 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
         waitingAfterCodeLogged = false;
       }
       if (state.codeError) {
-        addLog(`${account.email}：页面提示验证码无效或过期，重新查信。`, 'warn');
+        addLog(`${account.email}：页面提示验证码无效或过期，自动重新发送邮件并等待新验证码。`, 'warn');
         codeSubmittedAt = 0;
         waitingAfterCodeLogged = false;
+        const resent = await sendAuthCommand(tabId, 'TK_RESEND_CODE', {}).catch((error) => ({
+          error: error?.message || String(error || ''),
+        }));
+        if (resent?.clicked) {
+          codeRequestedAt = Date.now();
+          addLog(`${account.email}：已点击重新发送验证码邮件，旧验证码会被排除。`, 'info');
+          await sleep(3000);
+          continue;
+        }
+        addLog(`${account.email}：未找到重新发送按钮，继续排除旧验证码后查信。`, 'warn');
       }
       const codeResult = await fetchVerificationCode(mailAccount, codeRequestedAt, Array.from(triedCodes), settings, account);
       triedCodes.add(codeResult.code);

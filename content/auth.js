@@ -9,6 +9,7 @@
     'TK_FILL_PASSWORD',
     'TK_USE_EMAIL_CODE',
     'TK_FILL_CODE',
+    'TK_RESEND_CODE',
   ]);
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -36,6 +37,8 @@
         return useEmailCodeLogin();
       case 'TK_FILL_CODE':
         return fillCode(payload.code);
+      case 'TK_RESEND_CODE':
+        return resendCode();
       default:
         return {};
     }
@@ -186,6 +189,10 @@
     return findButtonByText(/one[-\s]*time|passcode|verification\s*code|email\s*(me|a)?\s*code|send.*code|use.*code|sign\s*in.*code|验证码|一次性|邮箱.*码|发送.*码/i);
   }
 
+  function findResendCodeButton() {
+    return findButtonByText(/resend|send\s+again|send\s+new|new\s+code|重新发送|再次发送|重发|发送电子邮件/i);
+  }
+
   function findOtherMethodButton() {
     return findButtonByText(/another\s*(way|method)|other\s*(way|method|options)|try\s*another|不同方式|其他方式|更多方式|换一种/i);
   }
@@ -325,5 +332,12 @@
     await delay(150);
     click(findSubmitButton());
     return { filled: true };
+  }
+
+  async function resendCode() {
+    const button = findResendCodeButton();
+    if (!button) return { clicked: false };
+    click(button);
+    return { clicked: true };
   }
 })();

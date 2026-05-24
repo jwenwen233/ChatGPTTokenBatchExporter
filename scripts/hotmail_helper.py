@@ -678,20 +678,19 @@ def select_latest_code(messages, sender_filters, subject_filters, exclude_codes,
 
         return {"code": code, "message": message}
 
-    for use_time_fallback in [False, True]:
-        matched = []
-        for message in messages:
-            result = match_message(message, apply_time_filter=not use_time_fallback)
-            if result:
-                matched.append(result)
-        if matched:
-            matched.sort(key=lambda item: int(item["message"].get("receivedTimestamp") or 0), reverse=True)
-            best = matched[0]
-            return {
-                "code": best["code"],
-                "message": best["message"],
-                "usedTimeFallback": use_time_fallback,
-            }
+    matched = []
+    for message in messages:
+        result = match_message(message, apply_time_filter=True)
+        if result:
+            matched.append(result)
+    if matched:
+        matched.sort(key=lambda item: int(item["message"].get("receivedTimestamp") or 0), reverse=True)
+        best = matched[0]
+        return {
+            "code": best["code"],
+            "message": best["message"],
+            "usedTimeFallback": False,
+        }
     return {"code": "", "message": None, "usedTimeFallback": False}
 
 
