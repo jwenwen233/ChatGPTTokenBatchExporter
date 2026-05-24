@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Token Exporter</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="app">
+    <header class="header">
+      <div class="header-left">
+        <div class="header-mark" aria-hidden="true">CPA</div>
+        <div class="header-copy">
+          <h1>Codex Auth 刷新写回</h1>
+          <p>后台探活 / 邮箱验证 / CPA JSON</p>
+        </div>
+      </div>
+      <span id="run-state" class="status-pill">读取中</span>
+    </header>
+
+    <section class="notice">
+      后台探活不打开 ChatGPT 页面；刷新失效账号时会从 chatgpt.com 首页进入登录并走邮箱验证码。
+    </section>
+
+    <section class="data-card">
+      <details id="session-converter" class="converter-details">
+        <summary>
+          <span>
+            <span class="section-label">Session JSON 转 CPA JSON</span>
+            <span class="data-value">chatgpt.com/api/auth/session</span>
+          </span>
+        </summary>
+        <div class="module converter-body">
+          <textarea id="session-json-input" class="data-textarea" spellcheck="false" placeholder="粘贴 https://chatgpt.com/api/auth/session 返回的 JSON"></textarea>
+          <button id="btn-convert-session-json" class="btn btn-primary" type="button">转换并下载 CPA JSON</button>
+        </div>
+      </details>
+    </section>
+
+    <section class="data-card">
+      <div class="section-mini-header">
+        <div class="section-mini-copy">
+          <span class="section-label">本地工具对接</span>
+          <span class="data-value">Cockpit 读写目录；CliProxy 通过管理 API 拉取和写回</span>
+        </div>
+      </div>
+      <div class="module">
+        <div class="data-row">
+          <span class="data-label">来源</span>
+          <select id="external-source" class="data-input">
+            <option value="cockpit">Cockpit</option>
+            <option value="cliproxy">CliProxy</option>
+          </select>
+        </div>
+        <div id="cliproxy-config" class="provider-config hidden">
+          <div class="data-row">
+            <span class="data-label">CPA 地址</span>
+            <input id="cliproxy-base-url" class="data-input" type="text" placeholder="http://127.0.0.1:8317">
+          </div>
+          <div class="data-row">
+            <span class="data-label">管理密钥</span>
+            <input id="cliproxy-management-key" class="data-input" type="password" placeholder="CliProxy 管理密钥">
+          </div>
+        </div>
+        <div class="cockpit-actions">
+          <button id="btn-select-cockpit-dir" class="btn btn-outline" type="button">选择目录</button>
+          <button id="btn-pull-cockpit-401" class="btn btn-outline" type="button">扫描文件</button>
+          <button id="btn-refresh-cockpit" class="btn btn-primary" type="button">刷新并写回</button>
+        </div>
+        <div id="cockpit-status" class="status-note">Cockpit 请选择 ~/.antigravity_cockpit；CliProxy 请选择来源后填写 CPA 地址和管理密钥。</div>
+        <div id="cockpit-list" class="cockpit-list"></div>
+      </div>
+    </section>
+
+    <section class="data-card">
+      <div class="section-mini-header">
+        <div class="section-mini-copy">
+          <span class="section-label">查信配置</span>
+          <span class="data-value">刷新登录时按 Token JSON 里的邮箱收验证码</span>
+        </div>
+      </div>
+
+      <div class="module">
+        <div class="data-row">
+          <span class="data-label">邮箱服务</span>
+          <select id="mail-provider" class="data-input">
+            <option value="microsoft">Outlook/Hotmail 账号池</option>
+            <option value="luckmail-api">LuckMail 查信</option>
+            <option value="cloudflare-temp-email">Cloudflare Temp Email 查信</option>
+          </select>
+        </div>
+
+        <div id="microsoft-config" class="provider-config">
+          <div class="section-mini-copy">
+            <span class="section-label">Outlook/Hotmail</span>
+            <span class="data-value">固定使用本地助手读取 IMAP 邮件</span>
+          </div>
+          <div id="microsoft-local-config" class="data-row">
+            <span class="data-label">助手地址</span>
+            <input id="microsoft-local-base-url" class="data-input" type="text" placeholder="http://127.0.0.1:17373">
+          </div>
+        </div>
+
+        <div id="mail-import-controls" class="provider-block">
+          <textarea id="mail-import" class="data-textarea" spellcheck="false" placeholder="email----password----clientId----refreshToken"></textarea>
+          <div class="data-row">
+            <span class="data-label">文件</span>
+            <input id="mail-import-file" class="file-input" type="file" accept=".txt,.csv,text/plain,text/csv">
+          </div>
+          <button id="btn-import-mail" class="btn btn-outline" type="button">导入邮箱</button>
+        </div>
+
+        <div id="luckmail-config" class="provider-config hidden">
+          <div class="section-mini-copy">
+            <span class="section-label">LuckMail</span>
+            <span class="data-value">只用于查收验证码邮件</span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">API Key</span>
+            <input id="luckmail-api-key" class="data-input" type="password" placeholder="LuckMail API Key">
+          </div>
+          <div class="data-row">
+            <span class="data-label">Base URL</span>
+            <input id="luckmail-base-url" class="data-input" type="text" placeholder="https://mails.luckyous.com">
+          </div>
+        </div>
+
+        <div id="cloudflare-temp-config" class="provider-config hidden">
+          <div class="section-mini-copy">
+            <span class="section-label">Cloudflare Temp Email</span>
+            <span class="data-value">默认按 accessToken 文件里的邮箱查信</span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">Temp API</span>
+            <input id="cloudflare-temp-base-url" class="data-input" type="text" placeholder="https://your-temp-mail.example">
+          </div>
+          <div class="data-row">
+            <span class="data-label">Admin Auth</span>
+            <input id="cloudflare-temp-admin-auth" class="data-input" type="password" placeholder="Admin Auth">
+          </div>
+          <div class="data-row">
+            <span class="data-label">Custom Auth</span>
+            <input id="cloudflare-temp-custom-auth" class="data-input" type="password" placeholder="仅站点启用访问密码时填写">
+          </div>
+          <div class="data-row">
+            <span class="data-label">查信方式</span>
+            <select id="cloudflare-temp-lookup-mode" class="data-input">
+              <option value="receive-mailbox">按 accessToken 邮箱</option>
+              <option value="registration-email">按 original_recipient</option>
+            </select>
+          </div>
+          <div class="data-row">
+            <span class="data-label">备用邮箱</span>
+            <input id="cloudflare-temp-receive-mailbox" class="data-input" type="email" placeholder="正常留空">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="data-card">
+      <div class="section-mini-header">
+        <div class="section-mini-copy">
+          <span class="section-label">设置</span>
+          <span class="data-value">检查频率、标签页行为</span>
+        </div>
+        <button id="btn-save-settings" class="btn btn-outline btn-sm" type="button">保存</button>
+      </div>
+      <div class="settings">
+        <label class="setting-toggle">
+          <span>定时自动检查</span>
+          <span class="toggle-switch">
+            <input type="checkbox" id="auto-check-enabled">
+            <span class="toggle-switch-track" aria-hidden="true"><span class="toggle-switch-thumb"></span></span>
+          </span>
+        </label>
+        <label class="setting-item">
+          <span>间隔分钟</span>
+          <input type="number" id="auto-check-minutes" class="data-input number-input" min="15" max="1440">
+        </label>
+        <label class="setting-item">
+          <span>剩余有效期低于</span>
+          <input type="number" id="min-token-validity-minutes" class="data-input number-input" min="1" max="1440">
+        </label>
+        <label class="setting-item">
+          <span>邮箱轮询次数</span>
+          <input type="number" id="mail-max-retries" class="data-input number-input" min="1" max="120">
+        </label>
+        <label class="setting-item">
+          <span>邮箱轮询间隔 ms</span>
+          <input type="number" id="mail-retry-delay-ms" class="data-input number-input" min="1000" max="60000">
+        </label>
+        <label class="setting-toggle">
+          <span>登录时激活标签页</span>
+          <span class="toggle-switch">
+            <input type="checkbox" id="activate-tabs">
+            <span class="toggle-switch-track" aria-hidden="true"><span class="toggle-switch-thumb"></span></span>
+          </span>
+        </label>
+        <label class="setting-toggle">
+          <span>完成后关闭登录标签</span>
+          <span class="toggle-switch">
+            <input type="checkbox" id="close-tabs-after-run">
+            <span class="toggle-switch-track" aria-hidden="true"><span class="toggle-switch-thumb"></span></span>
+          </span>
+        </label>
+        <label class="setting-toggle">
+          <span>后台实测 accessToken</span>
+          <span class="toggle-switch">
+            <input type="checkbox" id="direct-live-validate-access-token">
+            <span class="toggle-switch-track" aria-hidden="true"><span class="toggle-switch-thumb"></span></span>
+          </span>
+        </label>
+      </div>
+    </section>
+
+    <section class="data-card">
+      <div class="section-mini-header">
+        <div class="section-mini-copy">
+          <span class="section-label">ChatGPT 账号池</span>
+          <span class="data-value">账号状态与导出来源</span>
+        </div>
+        <button id="btn-toggle-accounts-list" class="btn btn-outline btn-sm pool-toggle hidden" type="button">展开</button>
+      </div>
+      <div id="accounts-list" class="list"></div>
+    </section>
+
+    <section class="data-card">
+      <div class="section-mini-header">
+        <div class="section-mini-copy">
+          <span class="section-label">邮箱池</span>
+          <span class="data-value">可用查信账号</span>
+        </div>
+        <button id="btn-toggle-mail-list" class="btn btn-outline btn-sm pool-toggle hidden" type="button">展开</button>
+      </div>
+      <div id="mail-list" class="list"></div>
+    </section>
+
+    <section class="data-card">
+      <div class="section-mini-header">
+        <div class="section-mini-copy">
+          <span class="section-label">日志</span>
+          <span class="data-value">最近 300 条</span>
+        </div>
+        <button id="btn-clear-logs" class="btn btn-ghost btn-sm" type="button">清空</button>
+      </div>
+      <pre id="logs" class="logs"></pre>
+    </section>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
