@@ -257,6 +257,31 @@ function normalizeEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '';
 }
 
+function normalizeEmailWithoutPlusAlias(value) {
+  const email = normalizeEmail(value);
+  if (!email) return '';
+  const [localPart, domain] = email.split('@');
+  const plusIndex = localPart.indexOf('+');
+  if (plusIndex <= 0) return email;
+  return `${localPart.slice(0, plusIndex)}@${domain}`;
+}
+
+function getEmailMatchCandidates(value) {
+  const email = normalizeEmail(value);
+  if (!email) return [];
+  return [...new Set([email, normalizeEmailWithoutPlusAlias(email)].filter(Boolean))];
+}
+
+function emailsMatch(left, right) {
+  const leftCandidates = new Set(getEmailMatchCandidates(left));
+  return getEmailMatchCandidates(right).some((candidate) => leftCandidates.has(candidate));
+}
+
+function getPreferredMailboxEmail(value) {
+  const candidates = getEmailMatchCandidates(value);
+  return candidates[1] || candidates[0] || '';
+}
+
 function normalizeMailAccountEmail(value) {
   const text = normalizeString(value).toLowerCase();
   if (text === '*') return '*';
@@ -1031,13 +1056,14 @@ async function resolveMailAccountForChatGptAccount(account, mailAccounts, settin
 
 function findMailAccountForChatGptAccount(account, mailAccounts, provider = '') {
   const target = normalizeEmail(account.mailAccountEmail || account.email);
+  const targets = getEmailMatchCandidates(target);
   const normalizedProvider = normalizeMailProviderId(provider);
   const candidates = normalizedProvider
     ? mailAccounts.filter((item) => normalizeMailProviderId(item.provider) === normalizedProvider)
     : mailAccounts;
-  return candidates.find((item) => normalizeMailAccountEmail(item.email) === target)
-    || candidates.find((item) => normalizeMailAccountEmail(item.email) === account.email)
-    || candidates.find((item) => normalizeMailAccountEmail(item.receiveMailbox) === target)
+  return candidates.find((item) => targets.some((email) => emailsMatch(item.email, email)))
+    || candidates.find((item) => emailsMatch(item.email, account.email))
+    || candidates.find((item) => targets.some((email) => emailsMatch(item.receiveMailbox, email)))
     || candidates.find((item) => normalizeMailAccountEmail(item.email) === '*')
     || null;
 }
@@ -1045,32 +1071,35 @@ function findMailAccountForChatGptAccount(account, mailAccounts, provider = '') 
 async function findLuckmailPurchaseForEmail(email, settings = {}) {
   const target = normalizeEmail(email);
   if (!target) throw new Error('LuckMail 缺少目标邮箱。');
+  const lookupTargets = getEmailMatchCandidates(target);
   const apiKey = normalizeString(settings.luckmailApiKey);
   if (!apiKey) throw new Error('LuckMail API Key 为空，请先填写。');
   const runtimeAccount = normalizeMailAccount({
     id: 'luckmail-runtime-lookup',
     provider: MAIL_PROVIDER_LUCKMAIL,
-    email: target,
+    email: getPreferredMailboxEmail(target) || target,
     apiKey,
     baseUrl: settings.luckmailBaseUrl || DEFAULT_SETTINGS.luckmailBaseUrl,
     status: 'ready',
   });
   const pageSize = 100;
-  for (let page = 1; page <= 20; page += 1) {
-    const payload = await requestLuckmailJson(runtimeAccount, 'GET', '/api/v1/openapi/email/purchases', {
-      params: {
-        page,
-        page_size: pageSize,
-        keyword: target,
-      },
-    });
-    const result = LuckMailUtils.normalizeLuckmailPurchaseListPage(payload);
-    const found = result.list.find((item) => normalizeEmail(item.email_address) === target);
-    if (found?.token) return found;
-    if (result.total && page * pageSize >= result.total) break;
-    if (!result.total && result.list.length < pageSize) break;
+  for (const keyword of lookupTargets) {
+    for (let page = 1; page <= 20; page += 1) {
+      const payload = await requestLuckmailJson(runtimeAccount, 'GET', '/api/v1/openapi/email/purchases', {
+        params: {
+          page,
+          page_size: pageSize,
+          keyword,
+        },
+      });
+      const result = LuckMailUtils.normalizeLuckmailPurchaseListPage(payload);
+      const found = result.list.find((item) => emailsMatch(item.email_address, target));
+      if (found?.token) return found;
+      if (result.total && page * pageSize >= result.total) break;
+      if (!result.total && result.list.length < pageSize) break;
+    }
   }
-  throw new Error(`LuckMail 未找到 ${target} 对应的已购邮箱 token。`);
+  throw new Error(`LuckMail 未找到 ${target} 或其基础邮箱对应的已购邮箱 token。`);
 }
 
 async function buildRuntimeLuckmailMailAccount(account, settings = {}) {
@@ -1079,7 +1108,7 @@ async function buildRuntimeLuckmailMailAccount(account, settings = {}) {
   return normalizeMailAccount({
     id: `luckmail-runtime-${target}`,
     provider: MAIL_PROVIDER_LUCKMAIL,
-    email: target,
+    email: getPreferredMailboxEmail(target) || target,
     token: purchase.token,
     apiKey: settings.luckmailApiKey,
     baseUrl: settings.luckmailBaseUrl || DEFAULT_SETTINGS.luckmailBaseUrl,
@@ -1253,7 +1282,7 @@ function assertAccessTokenMatchesAccount(account, accessToken) {
   if (!tokenEmail) {
     throw new Error(`${targetEmail || '当前账号'}：读取到的 accessToken 无法解析邮箱，已阻止更新。`);
   }
-  if (targetEmail && tokenEmail !== targetEmail) {
+  if (targetEmail && !emailsMatch(tokenEmail, targetEmail)) {
     throw new Error(`${targetEmail}：读取到的登录账号是 ${tokenEmail}，不是当前账号，已阻止用错误 JSON 覆盖。`);
   }
 }
@@ -1287,7 +1316,7 @@ async function driveLoginAndReadToken(loginTab, account, mailAccount, requestedA
       const session = await readSessionFromTab(tabId).catch(() => null);
       if (session?.accessToken) {
         const tokenEmail = extractEmailFromAccessToken(session.accessToken);
-        if (tokenEmail && tokenEmail !== normalizeEmail(account.email) && wrongSessionResets < 3) {
+        if (tokenEmail && !emailsMatch(tokenEmail, account.email) && wrongSessionResets < 3) {
           wrongSessionResets += 1;
           addLog(`${account.email}：当前浏览器仍是 ${tokenEmail} 登录态，清理后重新进入登录流程（${wrongSessionResets}/3）。`, 'warn');
           await replaceChatGptLoginTab(loginTab, settings, `${account.email}：关闭旧标签页并清理 ChatGPT 登录态。`);
@@ -1652,7 +1681,7 @@ async function fetchLuckmailVerificationCode(mailAccount, requestedAt, excludeCo
       ));
       const code = normalizeString(tokenCode.verification_code || tokenCode.mail?.verification_code);
       const remoteEmail = normalizeEmail(tokenCode.email_address);
-      if (targetEmail && remoteEmail && remoteEmail !== targetEmail) {
+      if (targetEmail && remoteEmail && !emailsMatch(remoteEmail, targetEmail)) {
         throw new Error(`LuckMail token 对应邮箱与当前账号不一致：当前账号 ${targetEmail}；token 邮箱 ${remoteEmail}`);
       }
       const mail = tokenCode.mail || null;
@@ -1736,7 +1765,7 @@ async function fetchCloudflareTempEmailVerificationCode(mailAccount, requestedAt
     throw new Error('Cloudflare Temp Email 缺少目标邮箱。');
   }
   const lookupMode = normalizeCloudflareLookupMode(mailAccount.lookupMode);
-  const queryAddress = lookupMode === 'registration-email' ? '' : targetEmail;
+  const queryAddresses = lookupMode === 'registration-email' ? [''] : getEmailMatchCandidates(targetEmail);
   const filters = buildCloudflareTempEmailCodeFilters(requestedAt, excludeCodes);
   const maxRetries = Math.max(1, Number(settings.mailMaxRetries) || 1);
   const retryDelayMs = Math.max(3000, Number(settings.mailRetryDelayMs) || 3000);
@@ -1744,15 +1773,18 @@ async function fetchCloudflareTempEmailVerificationCode(mailAccount, requestedAt
 
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     try {
-      const directPayload = await requestCloudflareTempEmailJson(mailAccount, '/admin/mails', {
-        searchParams: { limit: 20, offset: 0, address: queryAddress },
-      });
-      const directMessages = filterCloudflareTempEmailMessagesForTarget(
-        CloudflareTempEmailUtils.normalizeCloudflareTempEmailMailApiMessages(directPayload),
-        targetEmail,
-        queryAddress,
-        lookupMode
-      );
+      const directMessages = [];
+      for (const queryAddress of queryAddresses) {
+        const directPayload = await requestCloudflareTempEmailJson(mailAccount, '/admin/mails', {
+          searchParams: { limit: 20, offset: 0, address: queryAddress },
+        });
+        directMessages.push(...filterCloudflareTempEmailMessagesForTarget(
+          CloudflareTempEmailUtils.normalizeCloudflareTempEmailMailApiMessages(directPayload),
+          targetEmail,
+          queryAddress,
+          lookupMode
+        ));
+      }
       addLog(`${targetEmail}：Temp 查信 ${attempt}/${maxRetries}，按邮箱查询返回 ${directMessages.length} 封。`, 'info');
       let matchResult = pickVerificationCodeWithTimeFallback(directMessages, filters);
       let match = matchResult.match;
@@ -1763,7 +1795,7 @@ async function fetchCloudflareTempEmailVerificationCode(mailAccount, requestedAt
         const recentMessages = filterCloudflareTempEmailMessagesForTarget(
           CloudflareTempEmailUtils.normalizeCloudflareTempEmailMailApiMessages(recentPayload),
           targetEmail,
-          queryAddress,
+          '',
           lookupMode
         );
         addLog(`${targetEmail}：Temp 最近邮件本地匹配 ${recentMessages.length} 封。`, 'info');
@@ -1837,26 +1869,27 @@ function summarizeCloudflareTempEmailMessagesForLog(messages = []) {
 
 function filterCloudflareTempEmailMessagesForTarget(messages = [], targetEmail = '', queryAddress = '', lookupMode = '') {
   const target = normalizeEmail(targetEmail);
-  const query = normalizeEmail(queryAddress);
+  const targetCandidates = getEmailMatchCandidates(target);
+  const queryCandidates = getEmailMatchCandidates(queryAddress);
   return (Array.isArray(messages) ? messages : []).filter((message) => {
     const originalRecipient = normalizeEmail(message.originalRecipient);
     if (originalRecipient) {
-      return originalRecipient === target;
+      return targetCandidates.some((email) => emailsMatch(originalRecipient, email));
     }
     if (lookupMode === 'registration-email') {
       return cloudflareTempEmailMessageContainsTarget(message, target);
     }
     const address = normalizeEmail(message.address);
     return !address
-      || address === target
-      || address === query
+      || targetCandidates.some((email) => emailsMatch(address, email))
+      || queryCandidates.some((email) => emailsMatch(address, email))
       || cloudflareTempEmailMessageContainsTarget(message, target);
   });
 }
 
 function cloudflareTempEmailMessageContainsTarget(message = {}, targetEmail = '') {
-  const target = normalizeEmail(targetEmail);
-  if (!target) return false;
+  const targets = getEmailMatchCandidates(targetEmail);
+  if (!targets.length) return false;
   const haystack = [
     message.address,
     message.originalRecipient,
@@ -1864,7 +1897,7 @@ function cloudflareTempEmailMessageContainsTarget(message = {}, targetEmail = ''
     message.bodyPreview,
     message.raw,
   ].map((value) => String(value || '').toLowerCase()).join('\n');
-  return haystack.includes(target);
+  return targets.some((target) => haystack.includes(target));
 }
 
 async function testMailAccount(id) {
