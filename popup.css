@@ -603,6 +603,7 @@ button:hover {
   color: #d9ebe8;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  overscroll-behavior: contain;
   font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 

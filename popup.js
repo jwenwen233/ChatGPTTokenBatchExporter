@@ -1172,11 +1172,15 @@ function mailAccountConfigLabel(account = {}) {
 }
 
 function renderLogs(logs = []) {
+  const autoStickToBottom = !dom.logs
+    || dom.logs.scrollHeight - dom.logs.scrollTop - dom.logs.clientHeight < 24;
   dom.logs.textContent = logs.map((item) => {
     const time = new Date(item.at).toLocaleTimeString();
     return `[${time}] [${item.level}] ${item.message}`;
   }).join('\n');
-  dom.logs.scrollTop = dom.logs.scrollHeight;
+  if (autoStickToBottom) {
+    dom.logs.scrollTop = dom.logs.scrollHeight;
+  }
 }
 
 function render(options = {}) {
