@@ -1805,8 +1805,7 @@ async function fetchCloudflareTempEmailVerificationCode(mailAccount, requestedAt
         ));
       }
       addLog(`${targetEmail}：Temp 查信 ${attempt}/${maxRetries}，按邮箱查询返回 ${directMessages.length} 封。`, 'info');
-      let matchResult = pickVerificationCodeWithTimeFallback(directMessages, filters);
-      let match = matchResult.match;
+      let match = pickVerificationCodeWithinTimeWindow(directMessages, filters);
       if (!match?.code) {
         const recentPayload = await requestCloudflareTempEmailJson(mailAccount, '/admin/mails', {
           searchParams: { limit: 50, offset: 0 },
@@ -1820,15 +1819,12 @@ async function fetchCloudflareTempEmailVerificationCode(mailAccount, requestedAt
         addLog(`${targetEmail}：Temp 最近邮件本地匹配 ${recentMessages.length} 封。`, 'info');
         const sample = summarizeCloudflareTempEmailMessagesForLog(recentMessages);
         if (sample) addLog(`${targetEmail}：Temp 最近邮件样本：${sample}`, 'info');
-        matchResult = pickVerificationCodeWithTimeFallback(recentMessages, filters);
-        match = matchResult.match;
+        match = pickVerificationCodeWithinTimeWindow(recentMessages, filters);
       }
       if (match?.code) {
-        if (matchResult.usedTimeFallback) {
-          addLog(`${targetEmail}：严格时间窗口未命中，已用时间回退匹配到验证码。`, 'warn');
-        }
         return match;
       }
+      addLog(`${targetEmail}：严格时间窗口内未找到新验证码，继续等待新邮件。`, 'info');
       lastError = new Error(`Cloudflare Temp Email 暂未返回匹配验证码（${attempt}/${maxRetries}）。`);
     } catch (error) {
       lastError = error;
@@ -1850,20 +1846,8 @@ function buildCloudflareTempEmailCodeFilters(requestedAt, excludeCodes = []) {
   };
 }
 
-function pickVerificationCodeWithTimeFallback(messages = [], filters = {}) {
-  const strictMatch = MultiPageMicrosoftEmail.extractVerificationCodeFromMessages(messages, filters);
-  if (strictMatch?.code) {
-    return { match: strictMatch, usedTimeFallback: false };
-  }
-  const timeFallbackMatch = MultiPageMicrosoftEmail.extractVerificationCodeFromMessages(messages, {
-    ...filters,
-    filterAfterTimestamp: 0,
-    requiredKeywords: [],
-  });
-  return {
-    match: timeFallbackMatch || null,
-    usedTimeFallback: Boolean(timeFallbackMatch?.code),
-  };
+function pickVerificationCodeWithinTimeWindow(messages = [], filters = {}) {
+  return MultiPageMicrosoftEmail.extractVerificationCodeFromMessages(messages, filters);
 }
 
 function summarizeCloudflareTempEmailMessagesForLog(messages = []) {
